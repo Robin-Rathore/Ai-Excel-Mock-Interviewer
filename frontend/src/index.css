@@ -1,0 +1,50 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+.audio-visualizer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+}
+
+.audio-bar {
+  width: 3px;
+  background: #3b82f6;
+  border-radius: 2px;
+  transition: height 0.1s ease;
+}
+
+.speaking .audio-bar {
+  animation: audioWave 0.5s ease-in-out infinite alternate;
+}
+
+@keyframes audioWave {
+  0% {
+    height: 10px;
+  }
+  100% {
+    height: 30px;
+  }
+}
+
+.interview-container {
+  height: 100vh;
+  overflow: hidden;
+}
+
+.video-preview {
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
