@@ -1,26 +1,23 @@
-import { useInterview } from "./contexts/InterviewContext"
-import LandingPage from "./components/LandingPage"
-import InterviewScreen from "./components/InterviewScreen"
-import ReportScreen from "./components/ReportScreen"
+//@ts-nocheck
+import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import { Toaster } from 'react-hot-toast';
+import HRDashboard from './components/HRDashboard';
+import InterviewPage from './components/InterviewPage';
+import LandingPage from './components/LandingPage';
 
 function App() {
-  const { interviewStatus } = useInterview()
-
-  const renderScreen = () => {
-    switch (interviewStatus) {
-      case "not-started":
-        return <LandingPage />
-      case "in-progress":
-      case "waiting":
-        return <InterviewScreen />
-      case "completed":
-        return <ReportScreen />
-      default:
-        return <LandingPage />
-    }
-  }
-
-  return <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">{renderScreen()}</div>
+  return (
+    <Router>
+      <div className="min-h-screen bg-gray-50">
+        <Routes>
+          <Route path="/" element={<LandingPage />} />
+          <Route path="/hr" element={<HRDashboard />} />
+          <Route path="/interview" element={<InterviewPage />} />
+        </Routes>
+        <Toaster position="top-right" />
+      </div>
+    </Router>
+  );
 }
 
-export default App
+export default App;

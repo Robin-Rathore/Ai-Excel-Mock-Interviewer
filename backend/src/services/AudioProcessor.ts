@@ -1,43 +1,81 @@
-// ============= BACKEND: Updated AudioProcessor.ts =============
 //@ts-nocheck
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import fs from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
-import { InterviewManager } from './InterviewManager';
-import { io } from 'socket.io-client';
 
 export class AudioProcessor {
   private genAI: GoogleGenerativeAI;
+  private tempDir: string;
 
   constructor() {
     this.genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+    this.tempDir = path.join(process.cwd(), 'temp');
+    this.ensureTempDir();
   }
 
-  async speechToText(audioBuffer: Buffer): Promise<string> {
-    try {
-      // Save audio buffer to temporary file for processing
-      const tempFileName = `temp_audio_${uuidv4()}.webm`;
-      const tempDir = path.join(process.cwd(), 'temp');
+  private ensureTempDir(): void {
+    if (!fs.existsSync(this.tempDir)) {
+      fs.mkdirSync(this.tempDir, { recursive: true });
+    }
+  }
 
-      // Ensure temp directory exists
-      if (!fs.existsSync(tempDir)) {
-        fs.mkdirSync(tempDir, { recursive: true });
+  async speechToText(
+    audioBuffer: Buffer
+  ): Promise<{ text: string; confidence: number }> {
+    let tempFilePath = '';
+
+    try {
+      console.log('Processing audio buffer of size:', audioBuffer.length);
+
+      if (audioBuffer.length < 1000) {
+        throw new Error('Audio buffer too small - likely silence or no audio');
       }
 
-      const tempFilePath = path.join(tempDir, tempFileName);
+      // Create temporary file
+      const tempFileName = `audio_${uuidv4()}_${Date.now()}.webm`;
+      tempFilePath = path.join(this.tempDir, tempFileName);
+
+      // Write audio buffer to file
       fs.writeFileSync(tempFilePath, audioBuffer);
+      console.log('Audio file written:', tempFilePath);
+
+      // Verify file was written correctly
+      const fileStats = fs.statSync(tempFilePath);
+      if (fileStats.size === 0) {
+        throw new Error('Written audio file is empty');
+      }
 
       // Get the generative model
       const model = this.genAI.getGenerativeModel({
         model: 'gemini-1.5-flash',
       });
 
-      // Convert audio file to base64
+      // Read and encode audio file
       const audioData = fs.readFileSync(tempFilePath);
       const base64Audio = audioData.toString('base64');
 
-      // Create the request with audio data
+      console.log('Sending audio to Gemini AI for transcription...');
+
+      // Enhanced prompt for better transcription
+      const transcriptionPrompt = `
+You are a professional speech-to-text transcriber for an Excel skills interview. 
+
+CRITICAL INSTRUCTIONS:
+1. Transcribe EXACTLY what is spoken - every word, including filler words
+2. The speaker may have an Indian English accent - account for this
+3. Focus on Excel-related terminology (formulas, functions, pivot tables, etc.)
+4. If the speaker says "I don't know" or similar - transcribe it exactly
+5. Include hesitations like "um", "uh", "you know" as they indicate uncertainty
+6. Maintain original grammar and sentence structure as spoken
+7. If audio is unclear or silent, respond with "UNCLEAR_AUDIO"
+8. Do not add punctuation that wasn't clearly indicated by speech patterns
+
+Return ONLY the transcribed text, nothing else.
+
+Audio to transcribe:`;
+
+      // Send request to Gemini
       const result = await model.generateContent([
         {
           inlineData: {
@@ -45,333 +83,154 @@ export class AudioProcessor {
             data: base64Audio,
           },
         },
-        'Please transcribe this audio to text. Only return the transcribed text, no additional commentary or formatting.',
+        transcriptionPrompt,
       ]);
-
-      // Clean up temporary file
-      if (fs.existsSync(tempFilePath)) {
-        fs.unlinkSync(tempFilePath);
-      }
 
       const response = await result.response;
       const transcript = response.text().trim();
 
-      console.log('Speech to text result:', transcript);
-      return transcript;
-    } catch (error) {
-      console.error('Error in speech to text:', error);
+      console.log('Transcription result:', transcript);
 
-      // Clean up temp file on error
-      const tempFileName = `temp_audio_${uuidv4()}.webm`;
-      const tempFilePath = path.join(process.cwd(), 'temp', tempFileName);
-      if (fs.existsSync(tempFilePath)) {
-        fs.unlinkSync(tempFilePath);
+      // Check for unclear audio
+      if (transcript.includes('UNCLEAR_AUDIO') || transcript.length < 3) {
+        throw new Error('Audio transcription unclear or too short');
       }
 
-      throw new Error('Failed to convert speech to text: ' + error.message);
-    }
-  }
+      // Calculate confidence based on transcript quality
+      const confidence = this.calculateTranscriptionConfidence(transcript);
 
-  async textToSpeech(text: string): Promise<Buffer> {
-    try {
-      // Using Google Text-to-Speech via a simple approach
-      // For production, use proper TTS service like Google Cloud TTS, Azure Speech, etc.
-
-      // For now, we'll use the browser's built-in speech synthesis
-      // Return empty buffer and handle TTS on frontend
-      console.log('TTS Text:', text);
-      return Buffer.alloc(0);
-    } catch (error) {
-      console.error('Error in text to speech:', error);
-      return Buffer.alloc(0);
-    }
-  }
-
-  processAudioChunk(audioChunk: Buffer): Buffer {
-    // Basic audio processing - normalize volume, remove noise, etc.
-    return audioChunk;
-  }
-
-  detectSilence(audioBuffer: Buffer): boolean {
-    // Simple silence detection based on buffer size
-    return audioBuffer.length < 1000;
-  }
-
-  normalizeAudio(audioBuffer: Buffer): Buffer {
-    // Audio normalization logic
-    return audioBuffer;
-  }
-}
-
-// ============= FRONTEND: VoiceInterface Component =============
-// Create this as a React component or vanilla JS
-
-class VoiceInterface {
-  private socket: any;
-  private mediaRecorder: MediaRecorder | null = null;
-  private audioContext: AudioContext | null = null;
-  private isRecording = false;
-  private audioChunks: Blob[] = [];
-
-  constructor(socket: any) {
-    this.socket = socket;
-    this.initializeAudio();
-  }
-
-  async initializeAudio() {
-    try {
-      // Request microphone access
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          sampleRate: 44100,
-        },
-      });
-
-      // Initialize MediaRecorder
-      this.mediaRecorder = new MediaRecorder(stream, {
-        mimeType: 'audio/webm;codecs=opus',
-      });
-
-      // Initialize AudioContext for playback
-      this.audioContext = new (window.AudioContext ||
-        (window as any).webkitAudioContext)();
-
-      this.setupRecorderEvents();
-      console.log('Audio initialized successfully');
-    } catch (error) {
-      console.error('Failed to initialize audio:', error);
-      alert('Microphone access is required for voice interview');
-    }
-  }
-
-  setupRecorderEvents() {
-    if (!this.mediaRecorder) return;
-
-    this.mediaRecorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        this.audioChunks.push(event.data);
-      }
-    };
-
-    this.mediaRecorder.onstop = () => {
-      const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm' });
-      this.audioChunks = [];
-      this.sendAudioToServer(audioBlob);
-    };
-  }
-
-  startRecording() {
-    if (!this.mediaRecorder || this.isRecording) return;
-
-    this.audioChunks = [];
-    this.mediaRecorder.start();
-    this.isRecording = true;
-    console.log('Recording started');
-
-    // Visual feedback
-    this.updateMicButton(true);
-  }
-
-  stopRecording() {
-    if (!this.mediaRecorder || !this.isRecording) return;
-
-    this.mediaRecorder.stop();
-    this.isRecording = false;
-    console.log('Recording stopped');
-
-    // Visual feedback
-    this.updateMicButton(false);
-  }
-
-  async sendAudioToServer(audioBlob: Blob) {
-    try {
-      const arrayBuffer = await audioBlob.arrayBuffer();
-      const audioBuffer = new Uint8Array(arrayBuffer);
-
-      // Send audio data via WebSocket
-      this.socket.emit('audio-data', {
-        audio: Array.from(audioBuffer),
-        mimeType: 'audio/webm',
-      });
-
-      console.log('Audio sent to server');
-    } catch (error) {
-      console.error('Failed to send audio:', error);
-    }
-  }
-
-  async playAudioResponse(audioBuffer: ArrayBuffer) {
-    try {
-      if (!this.audioContext) {
-        this.audioContext = new (window.AudioContext ||
-          (window as any).webkitAudioContext)();
-      }
-
-      // Resume audio context if suspended (required by browser policies)
-      if (this.audioContext.state === 'suspended') {
-        await this.audioContext.resume();
-      }
-
-      // Decode and play audio
-      const audioData = await this.audioContext.decodeAudioData(audioBuffer);
-      const source = this.audioContext.createBufferSource();
-      source.buffer = audioData;
-      source.connect(this.audioContext.destination);
-      source.start(0);
-
-      console.log('Playing audio response');
-    } catch (error) {
-      console.error('Failed to play audio:', error);
-      // Fallback to HTML5 audio
-      this.playAudioFallback(audioBuffer);
-    }
-  }
-
-  playAudioFallback(audioBuffer: ArrayBuffer) {
-    try {
-      const blob = new Blob([audioBuffer], { type: 'audio/mpeg' });
-      const url = URL.createObjectURL(blob);
-      const audio = new Audio(url);
-
-      audio.onended = () => URL.revokeObjectURL(url);
-      audio.play().catch(console.error);
-    } catch (error) {
-      console.error('Audio fallback failed:', error);
-    }
-  }
-
-  updateMicButton(isRecording: boolean) {
-    const micButton = document.getElementById('mic-button');
-    if (micButton) {
-      micButton.style.backgroundColor = isRecording ? '#ef4444' : '#10b981';
-      micButton.textContent = isRecording ? '🛑 Stop' : '🎤 Talk';
-    }
-  }
-
-  // Toggle recording on button click
-  toggleRecording() {
-    if (this.isRecording) {
-      this.stopRecording();
-    } else {
-      this.startRecording();
-    }
-  }
-
-  // Voice Activity Detection (simple implementation)
-  startVoiceActivityDetection() {
-    // This would be more sophisticated in production
-    let silenceTimer: NodeJS.Timeout | null = null;
-
-    if (this.mediaRecorder && this.mediaRecorder.stream) {
-      const audioContext = new AudioContext();
-      const analyser = audioContext.createAnalyser();
-      const source = audioContext.createMediaStreamSource(
-        this.mediaRecorder.stream
-      );
-
-      source.connect(analyser);
-      analyser.fftSize = 256;
-
-      const bufferLength = analyser.frequencyBinCount;
-      const dataArray = new Uint8Array(bufferLength);
-
-      const checkAudioLevel = () => {
-        analyser.getByteFrequencyData(dataArray);
-        const average =
-          dataArray.reduce((sum, value) => sum + value, 0) / bufferLength;
-
-        if (average > 20 && !this.isRecording) {
-          // Voice detected, start recording
-          this.startRecording();
-        } else if (average < 10 && this.isRecording) {
-          // Silence detected, stop recording after delay
-          if (silenceTimer) clearTimeout(silenceTimer);
-          silenceTimer = setTimeout(() => {
-            this.stopRecording();
-          }, 1500); // Stop after 1.5 seconds of silence
-        } else if (average > 10 && silenceTimer) {
-          // Voice detected again, cancel stop timer
-          clearTimeout(silenceTimer);
-          silenceTimer = null;
-        }
-
-        requestAnimationFrame(checkAudioLevel);
+      return {
+        text: transcript,
+        confidence: confidence,
       };
-
-      checkAudioLevel();
+    } catch (error) {
+      console.error('Speech to text error:', error);
+      throw new Error(`Speech recognition failed: ${error.message}`);
+    } finally {
+      // Clean up temporary file
+      if (tempFilePath && fs.existsSync(tempFilePath)) {
+        try {
+          fs.unlinkSync(tempFilePath);
+          console.log('Cleaned up temp file:', tempFilePath);
+        } catch (cleanupError) {
+          console.error('Error cleaning up temp file:', cleanupError);
+        }
+      }
     }
   }
+
+  private calculateTranscriptionConfidence(transcript: string): number {
+    let confidence = 0.5; // Base confidence
+
+    // Length factor
+    if (transcript.length > 20) confidence += 0.2;
+    if (transcript.length > 50) confidence += 0.1;
+
+    // Excel terminology factor
+    const excelTerms = [
+      'excel',
+      'formula',
+      'function',
+      'cell',
+      'range',
+      'pivot',
+      'table',
+      'vlookup',
+      'sum',
+      'count',
+      'if',
+      'chart',
+      'data',
+      'worksheet',
+      'workbook',
+      'macro',
+      'vba',
+      'conditional',
+      'formatting',
+    ];
+
+    const foundTerms = excelTerms.filter((term) =>
+      transcript.toLowerCase().includes(term)
+    ).length;
+
+    confidence += Math.min(foundTerms * 0.05, 0.2);
+
+    // Uncertainty indicators (reduce confidence)
+    const uncertaintyPhrases = [
+      "i don't know",
+      'not sure',
+      'i think',
+      'maybe',
+      'probably',
+      'i guess',
+      'um',
+      'uh',
+      'you know',
+    ];
+
+    const uncertaintyCount = uncertaintyPhrases.filter((phrase) =>
+      transcript.toLowerCase().includes(phrase)
+    ).length;
+
+    confidence -= uncertaintyCount * 0.1;
+
+    return Math.max(0.1, Math.min(1.0, confidence));
+  }
+
+  // Clean up old temp files periodically
+  cleanupTempFiles(): void {
+    try {
+      const files = fs.readdirSync(this.tempDir);
+      const now = Date.now();
+      const maxAge = 30 * 60 * 1000; // 30 minutes
+
+      files.forEach((file) => {
+        const filePath = path.join(this.tempDir, file);
+        const stats = fs.statSync(filePath);
+
+        if (now - stats.mtime.getTime() > maxAge) {
+          fs.unlinkSync(filePath);
+          console.log('Cleaned up old temp file:', file);
+        }
+      });
+    } catch (error) {
+      console.error('Error cleaning up temp files:', error);
+    }
+  }
+
+  // Validate audio buffer quality
+  validateAudioBuffer(audioBuffer: Buffer): {
+    isValid: boolean;
+    reason?: string;
+  } {
+    if (!audioBuffer || audioBuffer.length === 0) {
+      return { isValid: false, reason: 'Empty audio buffer' };
+    }
+
+    if (audioBuffer.length < 1000) {
+      return { isValid: false, reason: 'Audio too short - likely silence' };
+    }
+
+    if (audioBuffer.length > 10 * 1024 * 1024) {
+      // 10MB limit
+      return { isValid: false, reason: 'Audio file too large' };
+    }
+
+    // Check for actual audio content (not just silence)
+    const samples = new Uint8Array(audioBuffer);
+    let nonZeroSamples = 0;
+
+    for (let i = 0; i < Math.min(samples.length, 1000); i++) {
+      if (samples[i] !== 0 && samples[i] !== 128) {
+        // 128 is silence in some formats
+        nonZeroSamples++;
+      }
+    }
+
+    if (nonZeroSamples < 10) {
+      return { isValid: false, reason: 'Audio appears to be silence' };
+    }
+
+    return { isValid: true };
+  }
 }
-
-// ============= BACKEND: Updated WebSocket Handler =============
-// Add this to your server.ts
-
-// io.on('connection', (socket) => {
-//   console.log('Client connected:', socket.id);
-
-//   // Handle audio data from client
-//   socket.on('audio-data', async (data) => {
-//     try {
-//       const { audio, mimeType } = data;
-//       const audioBuffer = Buffer.from(audio);
-
-//       // Process audio with your existing interview manager
-//       const transcript = await AudioProcessor.speechToText(audioBuffer);
-//       console.log('Transcript:', transcript);
-
-//       // Generate AI response
-//       const aiResponse = await InterviewManager.processResponse(
-//         socket.id,
-//         transcript
-//       );
-
-//       // Generate TTS audio
-//       const audioResponse = await AudioProcessor.textToSpeech(aiResponse);
-
-//       // Send audio response back to client
-//       socket.emit('audio-response', {
-//         text: aiResponse,
-//         audio: Array.from(audioResponse),
-//       });
-//     } catch (error) {
-//       console.error('Error processing audio:', error);
-//       socket.emit('error', { message: 'Failed to process audio' });
-//     }
-//   });
-// });
-
-// ============= FRONTEND: HTML Implementation =============
-// Add this to your frontend HTML
-
-/*
-<div id="voice-interview">
-  <button id="mic-button" onclick="voiceInterface.toggleRecording()">
-    🎤 Talk
-  </button>
-  <div id="status">Ready to start interview</div>
-  <div id="transcript"></div>
-</div>
-
-<script>
-  // Initialize voice interface
-  const socket = io('http://localhost:3001')
-  const voiceInterface = new VoiceInterface(socket)
-  
-  // Handle audio responses from server
-  socket.on('audio-response', (data) => {
-    const { text, audio } = data
-    
-    // Display text
-    document.getElementById('transcript').textContent = text
-    
-    // Play audio
-    const audioBuffer = new Uint8Array(audio).buffer
-    voiceInterface.playAudioResponse(audioBuffer)
-  })
-  
-  // Optional: Enable automatic voice activity detection
-  // voiceInterface.startVoiceActivityDetection()
-</script>
-*/

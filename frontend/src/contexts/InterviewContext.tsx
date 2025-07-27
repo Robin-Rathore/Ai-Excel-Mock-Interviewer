@@ -17,6 +17,7 @@ interface InterviewState {
   currentMessage: string;
   isListening: boolean;
   isAISpeaking: boolean;
+  isProcessing: boolean;
   scores: {
     technical: number;
     communication: number;
@@ -34,10 +35,14 @@ interface InterviewState {
     answer: string;
     score: number;
     timestamp: string;
+    feedback?: string;
   }>;
   questionCount: number;
   audioLevel: number;
+  silenceTimer: number;
+  recordingDuration: number;
   error: string | null;
+  connectionStatus: 'connecting' | 'connected' | 'disconnected';
 }
 
 type InterviewAction =
@@ -47,6 +52,7 @@ type InterviewAction =
   | { type: 'SET_MESSAGE'; payload: string }
   | { type: 'SET_LISTENING'; payload: boolean }
   | { type: 'SET_AI_SPEAKING'; payload: boolean }
+  | { type: 'SET_PROCESSING'; payload: boolean }
   | { type: 'UPDATE_SCORES'; payload: Partial<InterviewState['scores']> }
   | { type: 'SET_CANDIDATE_INFO'; payload: InterviewState['candidateInfo'] }
   | {
@@ -55,7 +61,13 @@ type InterviewAction =
     }
   | { type: 'SET_QUESTION_COUNT'; payload: number }
   | { type: 'SET_AUDIO_LEVEL'; payload: number }
+  | { type: 'SET_SILENCE_TIMER'; payload: number }
+  | { type: 'SET_RECORDING_DURATION'; payload: number }
   | { type: 'SET_ERROR'; payload: string | null }
+  | {
+      type: 'SET_CONNECTION_STATUS';
+      payload: InterviewState['connectionStatus'];
+    }
   | { type: 'RESET_INTERVIEW' };
 
 const initialState: InterviewState = {
@@ -65,6 +77,7 @@ const initialState: InterviewState = {
   currentMessage: '',
   isListening: false,
   isAISpeaking: false,
+  isProcessing: false,
   scores: {
     technical: 0,
     communication: 0,
@@ -75,7 +88,10 @@ const initialState: InterviewState = {
   conversationHistory: [],
   questionCount: 0,
   audioLevel: 0,
+  silenceTimer: 0,
+  recordingDuration: 0,
   error: null,
+  connectionStatus: 'connecting',
 };
 
 const interviewReducer = (
@@ -95,6 +111,8 @@ const interviewReducer = (
       return { ...state, isListening: action.payload };
     case 'SET_AI_SPEAKING':
       return { ...state, isAISpeaking: action.payload };
+    case 'SET_PROCESSING':
+      return { ...state, isProcessing: action.payload };
     case 'UPDATE_SCORES':
       return { ...state, scores: { ...state.scores, ...action.payload } };
     case 'SET_CANDIDATE_INFO':
@@ -108,10 +126,16 @@ const interviewReducer = (
       return { ...state, questionCount: action.payload };
     case 'SET_AUDIO_LEVEL':
       return { ...state, audioLevel: action.payload };
+    case 'SET_SILENCE_TIMER':
+      return { ...state, silenceTimer: action.payload };
+    case 'SET_RECORDING_DURATION':
+      return { ...state, recordingDuration: action.payload };
     case 'SET_ERROR':
       return { ...state, error: action.payload };
+    case 'SET_CONNECTION_STATUS':
+      return { ...state, connectionStatus: action.payload };
     case 'RESET_INTERVIEW':
-      return initialState;
+      return { ...initialState, connectionStatus: state.connectionStatus };
     default:
       return state;
   }
@@ -143,94 +167,124 @@ export const InterviewProvider: React.FC<{ children: React.ReactNode }> = ({
   const audioChunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
   const speechSynthesisRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const audioLevelTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const voicesLoadedRef = useRef<boolean>(false);
 
   useEffect(() => {
-    // Get the current host and use it for backend connection
+    initializeConnection();
+    loadVoices();
+
+    return () => {
+      cleanup();
+    };
+  }, []);
+
+  const initializeConnection = () => {
     const backendUrl =
       import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
 
-    // Initialize socket connection
+    dispatch({ type: 'SET_CONNECTION_STATUS', payload: 'connecting' });
+
     socketRef.current = io(backendUrl, {
       transports: ['websocket'],
       forceNew: true,
+      timeout: 10000,
+      reconnection: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000,
     });
 
     const socket = socketRef.current;
 
+    // Connection events
     socket.on('connect', () => {
-      console.log('Connected to server');
+      console.log('✅ Connected to server');
+      dispatch({ type: 'SET_CONNECTION_STATUS', payload: 'connected' });
       dispatch({ type: 'SET_ERROR', payload: null });
     });
 
-    socket.on('disconnect', () => {
-      console.log('Disconnected from server');
+    socket.on('disconnect', (reason) => {
+      console.log('❌ Disconnected from server:', reason);
+      dispatch({ type: 'SET_CONNECTION_STATUS', payload: 'disconnected' });
     });
 
+    socket.on('connect_error', (error) => {
+      console.error('❌ Connection error:', error);
+      dispatch({
+        type: 'SET_ERROR',
+        payload: 'Connection failed. Please check your internet connection.',
+      });
+    });
+
+    // Interview events
     socket.on('session-created', (sessionId: string) => {
-      console.log('Session created:', sessionId);
+      console.log('✅ Session created:', sessionId);
       dispatch({ type: 'SET_SESSION_ID', payload: sessionId });
     });
 
     socket.on(
       'candidate-info-extracted',
       (info: InterviewState['candidateInfo']) => {
-        console.log('Candidate info extracted:', info);
+        console.log('✅ Candidate info extracted:', info);
         dispatch({ type: 'SET_CANDIDATE_INFO', payload: info });
       }
     );
 
     socket.on('interview-started', () => {
-      console.log('Interview started');
+      console.log('✅ Interview started');
       dispatch({ type: 'SET_STATUS', payload: 'in-progress' });
     });
 
     socket.on('ai-speaking', () => {
-      console.log('AI is speaking');
+      console.log('🗣️ AI is speaking');
       dispatch({ type: 'SET_AI_SPEAKING', payload: true });
       dispatch({ type: 'SET_LISTENING', payload: false });
+      dispatch({ type: 'SET_PROCESSING', payload: false });
     });
 
     socket.on('ai-message', (message: string) => {
-      console.log('AI message:', message);
+      console.log('💬 AI message:', message.substring(0, 100) + '...');
       dispatch({ type: 'SET_MESSAGE', payload: message });
       dispatch({ type: 'SET_AI_SPEAKING', payload: false });
-
-      // Use text-to-speech to speak the message
       speakText(message);
     });
 
     socket.on('ai-question', (question: string) => {
-      console.log('AI question:', question);
+      console.log('❓ AI question:', question.substring(0, 100) + '...');
       dispatch({ type: 'SET_QUESTION', payload: question });
       dispatch({ type: 'SET_MESSAGE', payload: question });
       dispatch({ type: 'SET_AI_SPEAKING', payload: false });
-
-      // Use text-to-speech to speak the question
       speakText(question);
     });
 
     socket.on('start-listening', () => {
-      console.log('Start listening');
+      console.log('🎤 Start listening signal received');
       setTimeout(() => {
-        dispatch({ type: 'SET_LISTENING', payload: true });
-        startListening();
-      }, 1000); // Small delay after TTS finishes
+        if (!state.isAISpeaking) {
+          dispatch({ type: 'SET_LISTENING', payload: true });
+          startListening();
+        }
+      }, 2000); // Wait for TTS to finish
     });
 
     socket.on('stop-listening', () => {
-      console.log('Stop listening');
+      console.log('🛑 Stop listening signal received');
       dispatch({ type: 'SET_LISTENING', payload: false });
+      dispatch({ type: 'SET_PROCESSING', payload: true });
       stopListening();
     });
 
     socket.on('scores-updated', (scores: Partial<InterviewState['scores']>) => {
-      console.log('Scores updated:', scores);
+      console.log('📊 Scores updated:', scores);
       dispatch({ type: 'UPDATE_SCORES', payload: scores });
     });
 
     socket.on('question-completed', (data: any) => {
-      console.log('Question completed:', data);
+      console.log('✅ Question completed:', data);
       dispatch({ type: 'SET_QUESTION_COUNT', payload: data.questionNumber });
+      dispatch({ type: 'SET_PROCESSING', payload: false });
 
       // Add to conversation history
       if (state.currentQuestion) {
@@ -238,79 +292,127 @@ export const InterviewProvider: React.FC<{ children: React.ReactNode }> = ({
           type: 'ADD_CONVERSATION',
           payload: {
             question: state.currentQuestion,
-            answer: 'Voice response recorded',
+            answer: 'Response recorded',
             score: data.score,
             timestamp: new Date().toISOString(),
+            feedback: data.feedback,
           },
         });
       }
     });
 
     socket.on('interview-completed', (data: any) => {
-      console.log('Interview completed:', data);
+      console.log('🏁 Interview completed:', data);
       dispatch({ type: 'SET_STATUS', payload: 'completed' });
       dispatch({ type: 'SET_LISTENING', payload: false });
       dispatch({ type: 'SET_AI_SPEAKING', payload: false });
+      dispatch({ type: 'SET_PROCESSING', payload: false });
       dispatch({ type: 'UPDATE_SCORES', payload: data.scores });
+      cleanup();
     });
 
     socket.on('error', (error: string) => {
-      console.error('Socket error:', error);
+      console.error('❌ Socket error:', error);
       dispatch({ type: 'SET_ERROR', payload: error });
+      dispatch({ type: 'SET_PROCESSING', payload: false });
     });
+  };
 
-    return () => {
-      socket.disconnect();
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop());
-      }
-    };
-  }, []);
-
-  // Text-to-Speech function
-  const speakText = (text: string) => {
+  const loadVoices = () => {
     if ('speechSynthesis' in window) {
-      // Cancel any ongoing speech
-      window.speechSynthesis.cancel();
+      const loadVoicesHandler = () => {
+        const voices = window.speechSynthesis.getVoices();
+        if (voices.length > 0) {
+          voicesLoadedRef.current = true;
+          console.log('🔊 Voices loaded:', voices.length);
 
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.rate = 0.9;
-      utterance.pitch = 1;
-      utterance.volume = 1;
-
-      // Find a good voice (prefer female, English)
-      const voices = window.speechSynthesis.getVoices();
-      const preferredVoice =
-        voices.find(
-          (voice) =>
-            voice.lang.includes('en') &&
-            voice.name.toLowerCase().includes('female')
-        ) ||
-        voices.find((voice) => voice.lang.includes('en')) ||
-        voices[0];
-
-      if (preferredVoice) {
-        utterance.voice = preferredVoice;
-      }
-
-      utterance.onstart = () => {
-        console.log('TTS started');
-        dispatch({ type: 'SET_AI_SPEAKING', payload: true });
+          // Log available Indian English voices
+          const indianVoices = voices.filter((voice) =>
+            voice.lang.includes('en-IN')
+          );
+          console.log(
+            '🇮🇳 Indian English voices:',
+            indianVoices.map((v) => v.name)
+          );
+        }
       };
 
-      utterance.onend = () => {
-        console.log('TTS ended');
-        dispatch({ type: 'SET_AI_SPEAKING', payload: false });
-      };
+      // Load voices immediately if available
+      loadVoicesHandler();
 
-      utterance.onerror = (event) => {
-        console.error('TTS error:', event);
-        dispatch({ type: 'SET_AI_SPEAKING', payload: false });
-      };
-
-      speechSynthesisRef.current = utterance;
-      window.speechSynthesis.speak(utterance);
+      // Also listen for the event
+      window.speechSynthesis.onvoiceschanged = loadVoicesHandler;
     }
+  };
+
+  const speakText = (text: string) => {
+    if (!('speechSynthesis' in window)) {
+      console.warn('⚠️ Speech synthesis not supported');
+      return;
+    }
+
+    // Cancel any ongoing speech
+    window.speechSynthesis.cancel();
+
+    const utterance = new SpeechSynthesisUtterance(text);
+
+    // Enhanced settings for Indian English
+    utterance.rate = 0.8; // Slower for clarity
+    utterance.pitch = 1.1; // Slightly higher for female voice
+    utterance.volume = 0.9;
+
+    // Select the best available voice
+    const voices = window.speechSynthesis.getVoices();
+
+    // Priority order for voice selection
+    const preferredVoice =
+      voices.find(
+        (voice) =>
+          voice.lang === 'en-IN' && voice.name.toLowerCase().includes('female')
+      ) ||
+      voices.find((voice) => voice.lang === 'en-IN') ||
+      voices.find(
+        (voice) =>
+          voice.lang.startsWith('en-') &&
+          voice.name.toLowerCase().includes('female')
+      ) ||
+      voices.find(
+        (voice) =>
+          voice.lang.startsWith('en-') &&
+          (voice.name.toLowerCase().includes('samantha') ||
+            voice.name.toLowerCase().includes('karen') ||
+            voice.name.toLowerCase().includes('susan') ||
+            voice.name.toLowerCase().includes('raveena'))
+      ) ||
+      voices.find((voice) => voice.lang.startsWith('en-')) ||
+      voices[0];
+
+    if (preferredVoice) {
+      utterance.voice = preferredVoice;
+      console.log(
+        '🔊 Selected voice:',
+        preferredVoice.name,
+        preferredVoice.lang
+      );
+    }
+
+    utterance.onstart = () => {
+      console.log('🗣️ TTS started');
+      dispatch({ type: 'SET_AI_SPEAKING', payload: true });
+    };
+
+    utterance.onend = () => {
+      console.log('🔇 TTS ended');
+      dispatch({ type: 'SET_AI_SPEAKING', payload: false });
+    };
+
+    utterance.onerror = (event) => {
+      console.error('❌ TTS error:', event);
+      dispatch({ type: 'SET_AI_SPEAKING', payload: false });
+    };
+
+    speechSynthesisRef.current = utterance;
+    window.speechSynthesis.speak(utterance);
   };
 
   const startInterview = async (resumeFile: File) => {
@@ -319,14 +421,25 @@ export const InterviewProvider: React.FC<{ children: React.ReactNode }> = ({
       return;
     }
 
+    if (state.connectionStatus !== 'connected') {
+      dispatch({
+        type: 'SET_ERROR',
+        payload: 'Please wait for connection to establish',
+      });
+      return;
+    }
+
     dispatch({ type: 'SET_STATUS', payload: 'waiting' });
     dispatch({ type: 'SET_ERROR', payload: null });
 
     try {
-      // Convert file to base64 for transmission
-      const fileData = await new Promise<string>((resolve) => {
+      console.log('📤 Starting interview with file:', resumeFile.name);
+
+      // Convert file to base64
+      const fileData = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(reader.result as string);
+        reader.onerror = () => reject(new Error('Failed to read file'));
         reader.readAsDataURL(resumeFile);
       });
 
@@ -336,39 +449,21 @@ export const InterviewProvider: React.FC<{ children: React.ReactNode }> = ({
         fileType: resumeFile.type,
       });
     } catch (error) {
+      console.error('❌ Error starting interview:', error);
       dispatch({ type: 'SET_ERROR', payload: 'Failed to process resume file' });
     }
   };
 
-  const stopInterview = () => {
-    if (socketRef.current) {
-      socketRef.current.emit('stop-interview');
-    }
-    if (
-      mediaRecorderRef.current &&
-      mediaRecorderRef.current.state !== 'inactive'
-    ) {
-      mediaRecorderRef.current.stop();
-    }
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-    }
-    // Stop any ongoing speech
-    if ('speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
-    }
-    dispatch({ type: 'RESET_INTERVIEW' });
-  };
-
   const startListening = async () => {
     try {
-      console.log('Starting to listen...');
+      console.log('🎤 Starting to listen...');
 
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
-          sampleRate: 16000,
+          autoGainControl: true,
+          sampleRate: 44100,
         },
       });
 
@@ -377,14 +472,16 @@ export const InterviewProvider: React.FC<{ children: React.ReactNode }> = ({
       // Setup audio context for visualization
       audioContextRef.current = new AudioContext();
       analyserRef.current = audioContextRef.current.createAnalyser();
+      analyserRef.current.fftSize = 256;
       const source = audioContextRef.current.createMediaStreamSource(stream);
       source.connect(analyserRef.current);
 
       // Setup media recorder
-      mediaRecorderRef.current = new MediaRecorder(stream, {
-        mimeType: 'audio/webm;codecs=opus',
-      });
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : 'audio/webm';
 
+      mediaRecorderRef.current = new MediaRecorder(stream, { mimeType });
       audioChunksRef.current = [];
 
       mediaRecorderRef.current.ondataavailable = (event) => {
@@ -394,67 +491,108 @@ export const InterviewProvider: React.FC<{ children: React.ReactNode }> = ({
       };
 
       mediaRecorderRef.current.onstop = async () => {
-        console.log('Recording stopped, processing audio...');
-        const audioBlob = new Blob(audioChunksRef.current, {
-          type: 'audio/webm',
-        });
+        console.log('🛑 Recording stopped, processing audio...');
+
+        const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
 
         if (socketRef.current && audioBlob.size > 0) {
-          // Convert blob to array buffer then to array for transmission
-          const arrayBuffer = await audioBlob.arrayBuffer();
-          const audioArray = Array.from(new Uint8Array(arrayBuffer));
+          try {
+            const arrayBuffer = await audioBlob.arrayBuffer();
+            const audioArray = Array.from(new Uint8Array(arrayBuffer));
 
-          console.log('Sending audio data, size:', audioArray.length);
-          socketRef.current.emit('audio-data', audioArray);
+            console.log('📤 Sending audio data, size:', audioArray.length);
+            socketRef.current.emit('audio-data', audioArray);
+          } catch (error) {
+            console.error('❌ Error processing audio blob:', error);
+            dispatch({ type: 'SET_ERROR', payload: 'Failed to process audio' });
+          }
         }
 
         audioChunksRef.current = [];
       };
 
-      mediaRecorderRef.current.start();
-      console.log('Recording started');
+      mediaRecorderRef.current.start(100); // Collect data every 100ms
+      console.log('🎙️ Recording started');
 
-      // Auto-stop after 15 seconds
-      setTimeout(() => {
-        if (
-          mediaRecorderRef.current &&
-          mediaRecorderRef.current.state === 'recording'
-        ) {
-          console.log('Auto-stopping recording after 15 seconds');
-          mediaRecorderRef.current.stop();
-          dispatch({ type: 'SET_LISTENING', payload: false });
-        }
-      }, 15000);
-
-      // Start audio level monitoring
-      const updateAudioLevel = () => {
-        if (analyserRef.current && state.isListening) {
-          const dataArray = new Uint8Array(
-            analyserRef.current.frequencyBinCount
-          );
-          analyserRef.current.getByteFrequencyData(dataArray);
-          const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
-          dispatch({ type: 'SET_AUDIO_LEVEL', payload: average });
-          requestAnimationFrame(updateAudioLevel);
-        }
-      };
-      updateAudioLevel();
+      // Start monitoring
+      startAudioMonitoring();
+      startRecordingTimer();
     } catch (error) {
-      console.error('Error starting to listen:', error);
-      dispatch({ type: 'SET_ERROR', payload: 'Failed to access microphone' });
+      console.error('❌ Error starting to listen:', error);
+      dispatch({
+        type: 'SET_ERROR',
+        payload: 'Failed to access microphone. Please check permissions.',
+      });
     }
   };
 
+  const startAudioMonitoring = () => {
+    if (!analyserRef.current) return;
+
+    const bufferLength = analyserRef.current.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength);
+    let silenceCount = 0;
+    const silenceThreshold = 25;
+    const silenceLimit = 30; // 3 seconds at 10 checks per second
+
+    const checkAudioLevel = () => {
+      if (!analyserRef.current || !state.isListening) return;
+
+      analyserRef.current.getByteFrequencyData(dataArray);
+      const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+
+      dispatch({ type: 'SET_AUDIO_LEVEL', payload: average });
+
+      if (average < silenceThreshold) {
+        silenceCount++;
+        dispatch({ type: 'SET_SILENCE_TIMER', payload: silenceCount });
+
+        if (silenceCount >= silenceLimit) {
+          console.log('🔇 Silence detected, stopping recording');
+          stopListening();
+          return;
+        }
+      } else {
+        silenceCount = 0;
+        dispatch({ type: 'SET_SILENCE_TIMER', payload: 0 });
+      }
+
+      audioLevelTimerRef.current = setTimeout(checkAudioLevel, 100);
+    };
+
+    checkAudioLevel();
+  };
+
+  const startRecordingTimer = () => {
+    let duration = 0;
+    recordingTimerRef.current = setInterval(() => {
+      duration++;
+      dispatch({ type: 'SET_RECORDING_DURATION', payload: duration });
+    }, 1000);
+  };
+
   const stopListening = () => {
-    console.log('Stopping listening...');
+    console.log('🛑 Stopping listening...');
+
     if (
       mediaRecorderRef.current &&
       mediaRecorderRef.current.state === 'recording'
     ) {
       mediaRecorderRef.current.stop();
     }
+
+    if (audioLevelTimerRef.current) {
+      clearTimeout(audioLevelTimerRef.current);
+    }
+
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current);
+    }
+
     dispatch({ type: 'SET_LISTENING', payload: false });
     dispatch({ type: 'SET_AUDIO_LEVEL', payload: 0 });
+    dispatch({ type: 'SET_SILENCE_TIMER', payload: 0 });
+    dispatch({ type: 'SET_RECORDING_DURATION', payload: 0 });
   };
 
   const sendTextResponse = (text: string) => {
@@ -466,13 +604,66 @@ export const InterviewProvider: React.FC<{ children: React.ReactNode }> = ({
       return;
     }
 
-    console.log('Sending text response:', text);
+    if (state.connectionStatus !== 'connected') {
+      dispatch({
+        type: 'SET_ERROR',
+        payload: 'Connection lost. Please refresh the page.',
+      });
+      return;
+    }
+
+    console.log('📤 Sending text response:', text.substring(0, 100) + '...');
+
+    dispatch({ type: 'SET_PROCESSING', payload: true });
+
     socketRef.current.emit('text-response', {
       sessionId: state.sessionId,
       text: text,
     });
 
     dispatch({ type: 'SET_LISTENING', payload: false });
+  };
+
+  const stopInterview = () => {
+    console.log('🛑 Stopping interview...');
+
+    if (socketRef.current) {
+      socketRef.current.emit('stop-interview');
+    }
+
+    cleanup();
+    dispatch({ type: 'RESET_INTERVIEW' });
+  };
+
+  const cleanup = () => {
+    // Stop recording
+    if (
+      mediaRecorderRef.current &&
+      mediaRecorderRef.current.state !== 'inactive'
+    ) {
+      mediaRecorderRef.current.stop();
+    }
+
+    // Stop media stream
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+    }
+
+    // Clear timers
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+    }
+    if (audioLevelTimerRef.current) {
+      clearTimeout(audioLevelTimerRef.current);
+    }
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current);
+    }
+
+    // Stop speech synthesis
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
   };
 
   const downloadReport = () => {
@@ -488,7 +679,7 @@ export const InterviewProvider: React.FC<{ children: React.ReactNode }> = ({
       import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
     const downloadUrl = `${backendUrl}/api/report/download/${state.sessionId}`;
 
-    console.log('Downloading report from:', downloadUrl);
+    console.log('📥 Downloading report from:', downloadUrl);
     window.open(downloadUrl, '_blank');
   };
 
