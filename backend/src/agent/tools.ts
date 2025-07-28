@@ -19,20 +19,17 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Initialize services
 const redisClient = new RedisClient();
 const resumeParser = new ResumeParser();
 const reportGenerator = new ReportGenerator();
 const audioProcessor = new AudioProcessor();
 const aiAgent = new AIAgent();
 
-// Email configuration with enhanced Gmail setu
-
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   host: 'smtp.gmail.com',
   port: 587,
-  secure: false, // true for 465, false for other ports
+  secure: false,
   auth: {
     user: process.env.EMAIL,
     pass: process.env.PASSWORD,
