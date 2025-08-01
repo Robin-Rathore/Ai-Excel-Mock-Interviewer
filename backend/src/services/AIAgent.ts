@@ -1,4 +1,4 @@
-//@ts-nocheck
+//@ts-nocheckn
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
 interface CandidateInfo {
@@ -67,16 +67,20 @@ export class AIAgent {
   }
 
   async generateIntroduction(candidateInfo: CandidateInfo): Promise<string> {
-    const skillsList =
-      candidateInfo.skills.length > 0
+    // Fix: Ensure skills array exists and has default values
+    const skills =
+      candidateInfo.skills && candidateInfo.skills.length > 0
         ? candidateInfo.skills.slice(0, 3).join(', ')
         : 'basic Excel operations';
 
-    return `Namaste ${candidateInfo.name}! Welcome to your comprehensive Excel skills assessment.
+    const experienceLevel = candidateInfo.experienceLevel || 'Intermediate';
+    const name = candidateInfo.name || 'Candidate';
+
+    return `Namaste ${name}! Welcome to your comprehensive Excel skills assessment.
 
 I'm your AI interviewer, and I'll be conducting a thorough evaluation of your Excel knowledge and practical experience. This interview will take approximately 12 to 15 minutes and consists of 7 to 8 detailed questions.
 
-Based on your resume analysis, I can see you have experience with ${skillsList}, and your experience level appears to be ${candidateInfo.experienceLevel}.
+Based on your resume analysis, I can see you have experience with ${skills}, and your experience level appears to be ${experienceLevel}.
 
 Here's how this professional interview works:
 
@@ -103,42 +107,71 @@ Are you ready to begin? Let's start with our first question.`;
     candidateInfo: CandidateInfo,
     conversationHistory: ConversationItem[]
   ): Promise<string> {
-    const questionCount = conversationHistory.length;
-    const difficulty = this.determineDifficulty(
-      candidateInfo,
-      conversationHistory
-    );
+    try {
+      console.log('🧠 Generating next question...');
+      console.log(`👤 Candidate info: ${JSON.stringify(candidateInfo)}`);
+      console.log(
+        `📝 Conversation history: ${conversationHistory.length} items`
+      );
 
-    // Get questions for the determined difficulty level
-    const questions =
-      this.questionBank[difficulty] || this.questionBank.intermediate;
+      const questionCount = conversationHistory.length;
+      const difficulty = this.determineDifficulty(
+        candidateInfo,
+        conversationHistory
+      );
 
-    // Select question based on count, avoiding repetition
-    const questionIndex = questionCount % questions.length;
-    let selectedQuestion = questions[questionIndex];
+      console.log(`🔄 Determined difficulty level: ${difficulty}`);
 
-    // Adjust difficulty based on recent performance
-    if (conversationHistory.length > 0) {
-      const recentScores = conversationHistory
-        .slice(-2)
-        .map((item) => item.score);
-      const avgRecentScore =
-        recentScores.reduce((a, b) => a + b, 0) / recentScores.length;
+      // Get questions for the determined difficulty level
+      const questions =
+        this.questionBank[difficulty] || this.questionBank.intermediate;
 
-      if (avgRecentScore < 3 && difficulty !== 'beginner') {
-        selectedQuestion =
-          this.questionBank.beginner[
-            questionIndex % this.questionBank.beginner.length
-          ];
-      } else if (avgRecentScore > 8 && difficulty !== 'advanced') {
-        selectedQuestion =
-          this.questionBank.advanced[
-            questionIndex % this.questionBank.advanced.length
-          ];
+      // Select question based on count, avoiding repetition
+      const questionIndex = questionCount % questions.length;
+      let selectedQuestion = questions[questionIndex];
+
+      console.log(
+        `📊 Selected question index ${questionIndex} from ${difficulty} bank`
+      );
+
+      // Adjust difficulty based on recent performance
+      if (conversationHistory.length > 0) {
+        const recentScores = conversationHistory
+          .slice(-2)
+          .map((item) => item.score);
+        const avgRecentScore =
+          recentScores.reduce((a, b) => a + b, 0) / recentScores.length;
+
+        console.log(`📈 Average recent score: ${avgRecentScore}`);
+
+        if (avgRecentScore < 3 && difficulty !== 'beginner') {
+          selectedQuestion =
+            this.questionBank.beginner[
+              questionIndex % this.questionBank.beginner.length
+            ];
+          console.log(
+            '⬇️ Adjusted difficulty down to beginner based on recent scores'
+          );
+        } else if (avgRecentScore > 8 && difficulty !== 'advanced') {
+          selectedQuestion =
+            this.questionBank.advanced[
+              questionIndex % this.questionBank.advanced.length
+            ];
+          console.log(
+            '⬆️ Adjusted difficulty up to advanced based on recent scores'
+          );
+        }
       }
-    }
 
-    return selectedQuestion;
+      console.log(`✅ Final selected question: ${selectedQuestion}`);
+
+      return selectedQuestion;
+    } catch (error) {
+      console.error('❌ Error generating next question:', error);
+
+      // Fallback to a simple question
+      return 'Can you explain how you would use Excel in your daily work?';
+    }
   }
 
   async evaluateResponse(
@@ -147,7 +180,13 @@ Are you ready to begin? Let's start with our first question.`;
     transcriptionConfidence: number
   ): Promise<any> {
     try {
+      console.log('🧠 Evaluating response with AI...');
+      console.log(`❓ Question: ${question.substring(0, 100)}...`);
+      console.log(`💬 Answer: ${answer.substring(0, 100)}...`);
+      console.log(`🎯 Transcription confidence: ${transcriptionConfidence}`);
+
       if (!process.env.GEMINI_API_KEY) {
+        console.warn('⚠️ No Gemini API key found, using fallback evaluation');
         return this.fallbackEvaluation(question, answer);
       }
 
@@ -202,9 +241,13 @@ Provide your evaluation in this exact JSON format:
   "confidenceAdjustment": "How transcription confidence affected the evaluation"
 }`;
 
+      console.log('🔄 Sending evaluation request to Gemini...');
+
       const result = await model.generateContent(evaluationPrompt);
       const response = await result.response;
       const text = response.text();
+
+      console.log('✅ Received evaluation response from Gemini');
 
       // Extract JSON from response
       const jsonMatch = text.match(/\{[\s\S]*\}/);
@@ -241,9 +284,12 @@ Provide your evaluation in this exact JSON format:
           )}), which may have affected transcription accuracy.`;
         }
 
-        console.log('AI Evaluation completed:', {
+        console.log('📊 AI Evaluation completed:', {
           score: evaluation.score,
-          confidence: transcriptionConfidence,
+          technical: evaluation.technical,
+          practical: evaluation.practical,
+          communication: evaluation.communication,
+          completeness: evaluation.completeness,
         });
 
         return evaluation;
@@ -251,7 +297,7 @@ Provide your evaluation in this exact JSON format:
 
       throw new Error('No valid JSON in AI response');
     } catch (error) {
-      console.error('Error in AI evaluation:', error);
+      console.error('❌ Error in AI evaluation:', error);
       return this.fallbackEvaluation(question, answer);
     }
   }
@@ -468,8 +514,8 @@ Best of luck with your Excel skill development journey!`;
     // Start with resume-based assessment
     let difficulty: 'beginner' | 'intermediate' | 'advanced' = 'intermediate';
 
-    const experienceLevel = candidateInfo.experienceLevel.toLowerCase();
-    const skills = candidateInfo.skills.map((s) => s.toLowerCase());
+    const experienceLevel = (candidateInfo.experienceLevel || '').toLowerCase();
+    const skills = (candidateInfo.skills || []).map((s) => s.toLowerCase());
 
     // Initial difficulty based on resume
     if (experienceLevel.includes('beginner') || skills.length < 2) {
@@ -501,5 +547,51 @@ Best of luck with your Excel skill development journey!`;
     }
 
     return difficulty;
+  }
+
+  async extractCandidateInfo(
+    resumeText: string,
+    candidateEmail: string
+  ): Promise<string> {
+    try {
+      if (!process.env.GEMINI_API_KEY) {
+        throw new Error('Gemini API key not available');
+      }
+
+      const model = this.genAI.getGenerativeModel({
+        model: 'gemini-1.5-flash',
+      });
+
+      const prompt = `Extract candidate information from this resume text and return it as JSON.
+
+Resume Text:
+${resumeText}
+
+Candidate Email: ${candidateEmail}
+
+Extract the following information and return ONLY valid JSON:
+{
+  "name": "Full name of candidate",
+  "phone": "Phone number if found",
+  "experience_level": "Beginner/Intermediate/Advanced based on experience",
+  "excel_skills": ["List of Excel skills found"],
+  "total_experience": "Years of experience",
+  "current_role": "Current job title",
+  "education": "Education background",
+  "certifications": ["Any certifications"],
+  "projects": ["Relevant projects"]
+}
+
+If information is not found, use appropriate defaults. Return ONLY the JSON object.`;
+
+      const result = await model.generateContent(prompt);
+      const response = await result.response;
+      const text = response.text();
+
+      return text;
+    } catch (error) {
+      console.error('❌ Error in AI extraction:', error);
+      throw error;
+    }
   }
 }

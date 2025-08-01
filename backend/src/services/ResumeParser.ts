@@ -33,38 +33,102 @@ export class ResumeParser {
     let text = '';
 
     try {
+      console.log(
+        `📄 Parsing resume of type: ${fileType}, size: ${buffer.length} bytes`
+      );
+
+      if (!buffer || buffer.length === 0) {
+        throw new Error('Empty resume buffer provided');
+      }
+
       if (fileType === 'application/pdf') {
-        const pdfData = await pdfParse(buffer);
-        text = pdfData.text;
+        try {
+          const pdfData = await pdfParse(buffer);
+          text = pdfData.text;
+          console.log(
+            `✅ PDF parsed successfully, extracted ${text.length} characters`
+          );
+        } catch (pdfError) {
+          console.error('❌ PDF parsing error:', pdfError);
+          throw new Error(`PDF parsing failed: ${pdfError.message}`);
+        }
       } else if (
         fileType ===
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
       ) {
-        const docxData = await mammoth.extractRawText({ buffer });
-        text = docxData.value;
+        try {
+          const docxData = await mammoth.extractRawText({ buffer });
+          text = docxData.value;
+          console.log(
+            `✅ DOCX parsed successfully, extracted ${text.length} characters`
+          );
+        } catch (docxError) {
+          console.error('❌ DOCX parsing error:', docxError);
+          throw new Error(`DOCX parsing failed: ${docxError.message}`);
+        }
       } else {
-        throw new Error('Unsupported file type');
+        throw new Error(`Unsupported file type: ${fileType}`);
       }
 
-      return this.extractInformation(text);
+      // Ensure we have some text to work with
+      if (!text || text.trim().length < 10) {
+        console.warn(
+          '⚠️ Very little text extracted from resume, results may be limited'
+        );
+      }
+
+      // Extract information from text
+      const extractedInfo = this.extractInformation(text);
+      console.log(
+        '📋 Extracted resume information:',
+        JSON.stringify(extractedInfo, null, 2)
+      );
+
+      return extractedInfo;
     } catch (error) {
-      console.error('Error parsing resume:', error);
-      throw new Error('Failed to parse resume');
+      console.error('❌ Error parsing resume:', error);
+
+      // Return a minimal fallback object instead of throwing
+      return {
+        name: 'Candidate',
+        email: '',
+        skills: ['Basic Excel'],
+        experienceLevel: 'Beginner',
+        rawText: text || 'Failed to extract text from resume',
+        parsingError: error.message,
+      };
     }
   }
 
   private extractInformation(text: string): any {
+    console.log('🔍 Extracting information from resume text');
+
     const lines = text
       .split('\n')
       .map((line) => line.trim())
       .filter((line) => line.length > 0);
 
+    const name = this.extractName(lines);
+    const email = this.extractEmail(text);
+    const phone = this.extractPhone(text);
+    const skills = this.extractExcelSkills(text);
+    const experienceLevel = this.determineExperienceLevel(text);
+    const workExperience = this.extractWorkExperience(text);
+
+    console.log(`👤 Extracted name: ${name}`);
+    console.log(`📧 Extracted email: ${email}`);
+    console.log(`📱 Extracted phone: ${phone}`);
+    console.log(`🔧 Extracted skills: ${skills.join(', ')}`);
+    console.log(`📊 Determined experience level: ${experienceLevel}`);
+
     return {
-      name: this.extractName(lines),
-      email: this.extractEmail(text),
-      skills: this.extractExcelSkills(text),
-      experienceLevel: this.determineExperienceLevel(text),
-      rawText: text,
+      name,
+      email,
+      phone,
+      skills,
+      experienceLevel,
+      workExperience,
+      rawText: text.substring(0, 1000) + (text.length > 1000 ? '...' : ''),
     };
   }
 
@@ -196,5 +260,12 @@ export class ResumeParser {
     }
 
     return experiences;
+  }
+
+  private extractPhone(text: string): string {
+    // Simple phone number pattern: optional country code + 10-digit number
+    const phoneRegex = /(\+?\d{1,3}[-.\s]?)?\d{3}[-.\s]?\d{3}[-.\s]?\d{4}/;
+    const match = text.match(phoneRegex);
+    return match ? match[0] : '';
   }
 }

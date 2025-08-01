@@ -6,11 +6,6 @@ import { AIAgent } from './AIAgent.js';
 import { AudioProcessor } from './AudioProcessor.js';
 import { ReportGenerator } from './ReportGenerator.js';
 import type { Socket } from 'socket.io';
-import { v4 as uuidv4 } from 'uuid';
-import type { RedisClient } from './RedisClient.js';
-import { AIAgent } from './AIAgent.js';
-import { AudioProcessor } from './AudioProcessor.js';
-import { ReportGenerator } from './ReportGenerator.js';
 
 interface SessionData {
   sessionId: string;

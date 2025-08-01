@@ -78,7 +78,7 @@ const InterviewPage: React.FC = () => {
     }
 
     // Initialize socket connection
-    socketRef.current = io('http://localhost:3001', {
+    socketRef.current = io('http://localhost:3000', {
       transports: ['websocket'],
       forceNew: true,
       timeout: 10000,
@@ -287,7 +287,7 @@ const InterviewPage: React.FC = () => {
     try {
       // Create interview session
       const sessionResponse = await fetch(
-        `http://localhost:3001/api/interview/start/${encodeURIComponent(
+        `http://localhost:3000/api/interview/start/${encodeURIComponent(
           candidateEmail
         )}`
       );
@@ -306,7 +306,7 @@ const InterviewPage: React.FC = () => {
       formData.append('candidateEmail', candidateEmail);
 
       const uploadResponse = await fetch(
-        'http://localhost:3001/api/interview/upload-resume',
+        'http://localhost:3000/api/interview/upload-resume',
         {
           method: 'POST',
           body: formData,

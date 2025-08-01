@@ -1,10 +1,6 @@
 //@ts-nocheck
-import {
-  Annotation,
-  StateGraph,
-  MessagesAnnotation,
-} from '@langchain/langgraph';
-import { ToolMessage } from '@langchain/core/messages';
+import { StateGraph, MessagesAnnotation } from '@langchain/langgraph';
+import { ToolMessage, type BaseMessage } from '@langchain/core/messages';
 import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 import { excelInterviewTools } from './tools.js';
 import dotenv from 'dotenv';
@@ -16,19 +12,27 @@ const llm = new ChatGoogleGenerativeAI({
   model: 'gemini-1.5-flash',
   temperature: 0.3,
   maxRetries: 2,
+  apiKey: process.env.GEMINI_API_KEY,
 });
 
-// Define state annotation for Excel interview
-const ExcelInterviewStateAnnotation = Annotation.Root({
-  candidateEmail: Annotation,
-  sessionId: Annotation,
-  currentStep: Annotation,
-  interviewData: Annotation,
-  audioBuffer: Annotation,
-  transcript: Annotation,
-  evaluation: Annotation,
-  reportGenerated: Annotation,
-});
+// Define state interface
+interface InterviewState {
+  messages: BaseMessage[];
+  currentQuestion: string;
+  questionNumber: number;
+  totalQuestions: number;
+  candidateAnswers: Array<{
+    question: string;
+    answer: string;
+    score: number;
+    feedback: string;
+  }>;
+  resumeData: any;
+  experienceLevel: string;
+  isComplete: boolean;
+  audioBuffer?: Buffer;
+  lastAction: string;
+}
 
 // Create tools mapping
 const toolsByName = Object.fromEntries(
@@ -39,39 +43,32 @@ const toolsByName = Object.fromEntries(
 const llmWithTools = llm.bindTools(excelInterviewTools);
 
 // System prompt for Excel Interview AI
-const systemPrompt = `You are an AI Excel Skills Interviewer, designed to conduct comprehensive Excel assessments for job candidates.
+const systemPrompt = `You are an AI Excel Skills Interviewer conducting comprehensive Excel assessments for job candidates.
 
 CORE RESPONSIBILITIES:
-1. Parse candidate resumes and extract Excel-related experience (with robust fallbacks)
-2. Generate personalized interview introductions (even with minimal data)
-3. Create dynamic questions based on candidate background and previous responses
+1. Process candidate resumes and extract Excel-related experience
+2. Generate personalized interview introductions with Indian English female voice
+3. Create dynamic questions based on candidate background
 4. Process voice responses using speech-to-text
-5. Evaluate responses with strict professional standards
-6. Generate detailed PDF reports
+5. Evaluate responses with professional standards (0-10 scale)
+6. Generate detailed reports with scores and feedback
 7. Send professional follow-up communications
 
-CRITICAL WORKFLOW HANDLING:
-- If resume parsing fails, ALWAYS create a fallback profile and continue
-- If candidate profile is missing, generate one from email and continue
-- Never stop the interview due to parsing failures
-- Always provide a professional experience regardless of data quality
-
 INTERVIEW FLOW:
-1. Resume Analysis → Extract skills, experience level, background (with fallbacks)
-2. Personalized Introduction → Welcome candidate, explain process (even with basic info)
+1. Resume Analysis → Extract skills, experience level, background
+2. Personalized Introduction → Welcome candidate, explain process
 3. Dynamic Questioning → 7-8 questions adapted to candidate level
 4. Voice Processing → Convert speech to text accurately
 5. Response Evaluation → Score on technical accuracy, communication, problem-solving
-6. Report Generation → Comprehensive PDF with feedback
-7. Thank You Email → Professional follow-up with attached report
+6. Report Generation → Comprehensive feedback with recommendations
 
-EVALUATION STANDARDS:
+EVALUATION STANDARDS (0-10 scale):
 - Technical Accuracy (40%): Correct Excel knowledge and procedures
 - Practical Application (30%): Real-world understanding and examples
 - Communication Clarity (20%): Clear explanations and structure
 - Completeness (10%): Fully addressing the question
 
-SCORING GUIDELINES (0-10 scale):
+SCORING GUIDELINES:
 - 9-10: Exceptional knowledge with perfect examples
 - 7-8: Very good understanding with minor gaps
 - 5-6: Adequate knowledge but missing key points
@@ -85,20 +82,7 @@ COMMUNICATION STYLE:
 - Supportive feedback regardless of performance
 - Honest assessment with constructive guidance
 
-TOOL USAGE:
-- Always use appropriate tools for each step
-- If a tool fails, use fallback approaches
-- Process responses sequentially through the interview flow
-- Maintain session state throughout the interview
-- Generate comprehensive reports with actionable feedback
-
-FAILURE HANDLING:
-- If parseResume fails, immediately call generateIntroduction with fallback
-- If any tool fails, continue with the next logical step
-- Never leave the candidate waiting due to technical issues
-- Always provide a professional interview experience
-
-Remember: This is a professional assessment that impacts hiring decisions. Maintain high standards while being fair and encouraging to all candidates. Technical failures should never prevent a candidate from completing their interview.`;
+Always use appropriate tools for each step and maintain professional standards throughout the interview process.`;
 
 // LLM Node
 async function llmNode(state) {
@@ -129,11 +113,8 @@ async function toolExecutionNode(state) {
         const tool = toolsByName[toolCall.name];
         try {
           console.log(`🔧 Executing tool: ${toolCall.name}`);
-          console.log(`📝 Tool args:`, toolCall.args);
-
           const observation = await tool.invoke(toolCall.args || {});
-
-          console.log(`✅ Tool result:`, observation.substring(0, 200) + '...');
+          console.log(`✅ Tool ${toolCall.name} executed successfully`);
 
           results.push(
             new ToolMessage({
@@ -150,17 +131,6 @@ async function toolExecutionNode(state) {
             })
           );
         }
-      } else {
-        if (toolCall && toolCall.id) {
-          results.push(
-            new ToolMessage({
-              content: `Error: Invalid tool request for '${
-                toolCall?.name || 'unknown tool'
-              }'`,
-              tool_call_id: toolCall.id,
-            })
-          );
-        }
       }
     }
   }
@@ -171,6 +141,7 @@ async function toolExecutionNode(state) {
 // Decision function
 function determineNextStep(state) {
   const lastMessage = state.messages.at(-1);
+
   if (
     lastMessage?.tool_calls &&
     Array.isArray(lastMessage.tool_calls) &&
@@ -178,6 +149,7 @@ function determineNextStep(state) {
   ) {
     return 'ExecuteTool';
   }
+
   return '__end__';
 }
 
@@ -198,7 +170,6 @@ async function runExcelInterviewAgent(userMessage, context = {}) {
   try {
     console.log('🚀 Starting Excel Interview Agent');
     console.log('📝 User message:', userMessage);
-    console.log('🔧 Context:', context);
 
     const result = await excelInterviewAgent.invoke({
       messages: [
@@ -217,93 +188,4 @@ async function runExcelInterviewAgent(userMessage, context = {}) {
   }
 }
 
-// Specialized functions for different interview phases
-async function processResumeAndIntroduce(
-  candidateEmail,
-  resumeBuffer,
-  fileType
-) {
-  try {
-    // First try to parse the resume
-    const parseResult = await runExcelInterviewAgent(
-      `Parse the resume for candidate ${candidateEmail} and then generate an introduction. If parsing fails, create a fallback profile and generate introduction anyway.`,
-      {
-        candidateEmail,
-        resumeBuffer,
-        fileType,
-      }
-    );
-
-    return parseResult;
-  } catch (error) {
-    console.error(
-      '❌ Resume processing failed, using fallback approach:',
-      error
-    );
-
-    // Fallback: Just generate introduction with basic info
-    return await runExcelInterviewAgent(
-      `Generate introduction for candidate: ${candidateEmail}. Create a basic profile if none exists.`,
-      { candidateEmail }
-    );
-  }
-}
-
-async function conductInterviewQuestion(sessionId) {
-  return await runExcelInterviewAgent(
-    `Generate next question for interview session: ${sessionId}`,
-    { sessionId }
-  );
-}
-
-async function processAudioResponse(sessionId, audioBuffer) {
-  return await runExcelInterviewAgent(
-    `Process audio response for session: ${sessionId}`,
-    { sessionId, audioBuffer }
-  );
-}
-
-async function evaluateAndScore(sessionId, transcript, confidence = 1.0) {
-  return await runExcelInterviewAgent(
-    `Evaluate response for session: ${sessionId} with transcript: ${transcript}`,
-    {
-      sessionId,
-      transcript,
-      confidence,
-    }
-  );
-}
-
-async function generateReportAndSendEmail(sessionId) {
-  return await runExcelInterviewAgent(
-    `Generate report and send thank you email for session: ${sessionId}`,
-    {
-      sessionId,
-    }
-  );
-}
-
-async function sendPreScreeningInvitations(candidateEmails, hrEmail) {
-  return await runExcelInterviewAgent(
-    `Send pre-screening invitations to candidates: ${candidateEmails.join(
-      ', '
-    )}`,
-    {
-      candidateEmails,
-      hrEmail,
-    }
-  );
-}
-
-// Export everything
-export {
-  excelInterviewAgent,
-  runExcelInterviewAgent,
-  processResumeAndIntroduce,
-  conductInterviewQuestion,
-  processAudioResponse,
-  evaluateAndScore,
-  generateReportAndSendEmail,
-  sendPreScreeningInvitations,
-  ExcelInterviewStateAnnotation,
-};
+export { runExcelInterviewAgent };

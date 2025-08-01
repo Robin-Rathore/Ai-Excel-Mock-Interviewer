@@ -183,7 +183,7 @@ export const InterviewProvider: React.FC<{ children: React.ReactNode }> = ({
 
   const initializeConnection = () => {
     const backendUrl =
-      import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
+      import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000';
 
     dispatch({ type: 'SET_CONNECTION_STATUS', payload: 'connecting' });
 
@@ -676,7 +676,7 @@ export const InterviewProvider: React.FC<{ children: React.ReactNode }> = ({
     }
 
     const backendUrl =
-      import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
+      import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000';
     const downloadUrl = `${backendUrl}/api/report/download/${state.sessionId}`;
 
     console.log('📥 Downloading report from:', downloadUrl);

@@ -17,7 +17,7 @@ const HRDashboard: React.FC = () => {
     setIsLoading(true);
 
     try {
-      const response = await fetch('http://localhost:3001/api/hr/login', {
+      const response = await fetch('http://localhost:3000/api/hr/login', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -62,7 +62,7 @@ const HRDashboard: React.FC = () => {
       }
 
       const response = await fetch(
-        'http://localhost:3001/api/hr/send-invitations',
+        'http://localhost:3000/api/hr/send-invitations',
         {
           method: 'POST',
           headers: {
